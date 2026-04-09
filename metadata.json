@@ -1,0 +1,5 @@
+{
+  "name": "QuizShare AI",
+  "description": "Create, practice, and share custom quizzes with friends. Uses AI to generate questions from your notes.",
+  "requestFramePermissions": ["camera"]
+}

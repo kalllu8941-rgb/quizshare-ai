@@ -1,0 +1,147 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: {userId}
+    // Fields:
+    //   - uid: string (required)
+    //   - displayName: string (optional)
+    //   - email: string (required)
+    //   - photoURL: string (optional)
+    //
+    // Collection: quizzes
+    // Document ID: {quizId}
+    // Fields:
+    //   - id: string
+    //   - title: string (required, 1-200 chars)
+    //   - description: string (optional, 0-2000 chars)
+    //   - creatorId: string (required)
+    //   - creatorName: string (optional)
+    //   - createdAt: timestamp (required)
+    //   - questions: list (required, max 100 items)
+    //   - isPublic: bool (required)
+    //   - difficulty: string (required, Easy/Medium/Hard)
+    //   - timePerQuestion: number (required, 5-300)
+    //
+    // Collection: attempts
+    // Document ID: {attemptId}
+    // Fields:
+    //   - userId: string (required)
+    //   - quizId: string (required)
+    //   - quizTitle: string (required)
+    //   - score: number (required)
+    //   - totalQuestions: number (required)
+    //   - completedAt: timestamp (required)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isNotBanned() {
+      return request.auth != null && 
+             (!exists(/databases/$(database)/documents/users/$(request.auth.uid)) || 
+              get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('isBanned', false) == false);
+    }
+
+    function isAdmin() {
+      return request.auth != null && (
+        request.auth.token.email == "pawan80268@gmail.com" ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin')
+      );
+    }
+
+    function isOwner(userId) {
+      return isNotBanned() && request.auth.uid == userId;
+    }
+
+    function isQuizOwner(quizData) {
+      return isNotBanned() && request.auth.uid == quizData.creatorId;
+    }
+
+    function isOnlyUpdatingCounters() {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likes', 'plays']);
+    }
+
+    function isValidUser(data) {
+      let requiredFields = ['uid', 'email', 'createdAt', 'role', 'isBanned'];
+      let optionalFields = ['displayName', 'photoURL'];
+      
+      return data.keys().hasAll(requiredFields) &&
+             data.keys().hasOnly(requiredFields.concat(optionalFields)) &&
+             data.uid is string &&
+             data.email is string &&
+             data.createdAt is string &&
+             data.role in ['admin', 'user'] &&
+             data.isBanned is bool &&
+             (!('displayName' in data) || (data.displayName is string && data.displayName.size() < 100)) &&
+             (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() < 500));
+    }
+
+    function isValidQuiz(data) {
+      let requiredFields = ['title', 'creatorId', 'questions', 'isPublic', 'createdAt', 'difficulty', 'timePerQuestion'];
+      let optionalFields = ['description', 'creatorName', 'likes', 'plays', 'isFeatured'];
+      
+      return data.keys().hasAll(requiredFields) &&
+             data.keys().hasOnly(requiredFields.concat(optionalFields)) &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 200 &&
+             data.creatorId is string &&
+             data.questions is list && data.questions.size() <= 100 &&
+             data.isPublic is bool &&
+             data.createdAt is timestamp &&
+             data.difficulty in ['Easy', 'Medium', 'Hard'] &&
+             data.timePerQuestion is number && data.timePerQuestion >= 5 && data.timePerQuestion <= 300 &&
+             (!('description' in data) || (data.description is string && data.description.size() <= 2000)) &&
+             (!('creatorName' in data) || (data.creatorName is string && data.creatorName.size() <= 100)) &&
+             (!('isFeatured' in data) || data.isFeatured is bool);
+    }
+
+    function isValidAttempt(data) {
+      return data.keys().hasAll(['userId', 'quizId', 'quizTitle', 'score', 'totalQuestions', 'completedAt']) &&
+             data.userId is string && data.userId == request.auth.uid &&
+             data.quizId is string &&
+             data.quizTitle is string &&
+             data.score is number &&
+             data.totalQuestions is number &&
+             data.completedAt is timestamp;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if request.auth != null && (request.auth.uid == userId || isAdmin());
+      allow create: if isOwner(userId) && isValidUser(request.resource.data) && request.resource.data.isBanned == false;
+      allow update: if (isAdmin() && isValidUser(request.resource.data)) ||
+                      (isOwner(userId) && isValidUser(request.resource.data) && request.resource.data.isBanned == resource.data.isBanned && request.resource.data.role == resource.data.role);
+    }
+
+    match /quizzes/{quizId} {
+      allow read: if request.auth != null && (resource.data.isPublic == true || resource.data.creatorId == request.auth.uid || isAdmin());
+      allow create: if isNotBanned() && 
+                      request.resource.data.creatorId == request.auth.uid && 
+                      isValidQuiz(request.resource.data) &&
+                      (!('isFeatured' in request.resource.data) || request.resource.data.isFeatured == false);
+      allow update: if (isAdmin() && isValidQuiz(request.resource.data)) ||
+                      (request.auth != null && isOnlyUpdatingCounters()) ||
+                      (isQuizOwner(resource.data) && 
+                       request.resource.data.creatorId == resource.data.creatorId &&
+                       request.resource.data.createdAt == resource.data.createdAt &&
+                       isValidQuiz(request.resource.data) &&
+                       (!('isFeatured' in request.resource.data) || request.resource.data.isFeatured == resource.data.isFeatured));
+      allow delete: if isAdmin() || isQuizOwner(resource.data);
+    }
+
+    match /attempts/{attemptId} {
+      allow read: if request.auth != null && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isNotBanned() && isValidAttempt(request.resource.data);
+    }
+  }
+}
